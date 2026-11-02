@@ -43,6 +43,19 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 		return badge
 
 	getSearchFilter: (data, key=@name()) ->
+		# The field itself is not searchable, both filters have to go to the mapped "search_value".
+		if data[key+":unset"]
+			filter =
+				type: "in"
+				fields: @getFieldNamesForSearch()
+				in: [ null ]
+			filter._unnest = true
+			filter._unset_filter = true
+			return filter
+
+		if data[key+":has_value"]
+			return @getHasValueFilter(data, key)
+
 		filter = super(data, key)
 		if filter
 			return filter
@@ -68,6 +81,18 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 					in: [ str ]
 		filter
 
+	getHasValueFilter: (data, key=@name()) ->
+		if not data[key+":has_value"]
+			return
+		filter =
+			type: "in"
+			fields: @getFieldNamesForSearch()
+			in: [ null ]
+			bool: "must_not"
+		filter._unnest = true
+		filter._has_value_filter = true
+		return filter
+
 	__getFieldNames: ->
 		fieldNames = [
 			"#{@fullName()}.search_value"
@@ -80,13 +105,15 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 		resultObject = opts.editor?.object # The editor will not be present in the preview editor (datamodel -> masks)
 		standard = resultObject?.getStandard() or ""
 
-		baseCssURL = "build/webfrontend/base.css" # todo: what is the correct URL ???
+		contentCSS = [ CustomDataTypeHtmlEditor.getAssetURL("base.css") ]
 		customCSSURL = ez5.session.getBaseConfig("plugin", "custom-data-type-html-editor").html_editor?.custom_css_url
+		if customCSSURL
+			contentCSS.push(customCSSURL)
 		editorToolbar = "undo redo | link image | styleselect | bold italic forecolor backcolor | alignleft aligncenter alignright alignjustify | outdent indent numlist bullist"
 		inputEditor = null
 
 		inputElement = CUI.dom.element("input")
-		inputElement.value = initData.value
+		inputElement.value = CustomDataTypeHtmlEditor.sanitize(initData.value)
 		CUI.dom.addClass(inputElement, "ez5-custom-data-type-html-editor-fixed-height")
 		CUI.dom.setStyle(inputElement, visibility: "hidden")
 
@@ -97,7 +124,7 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 					toolbar: editorToolbar
 					toolbar_mode: 'sliding'
 					target: inputElement
-					content_css: [baseCssURL, customCSSURL]
+					content_css: contentCSS
 					plugins: "image paste lists"
 					paste_data_images: true
 					setup: ((inputText) ->
@@ -161,7 +188,7 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 				win.document.head.appendChild(pluginCSSLinkElement)
 
 				windowInputElement = CUI.dom.element("input")
-				windowInputElement.value = initData.value
+				windowInputElement.value = CustomDataTypeHtmlEditor.sanitize(initData.value)
 
 				verticalLayout = new CUI.VerticalLayout
 					class: "ez5-custom-data-type-html-editor-window"
@@ -207,7 +234,7 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 						target: windowInputElement
 						toolbar_mode: 'sliding'
 						height: "100%"
-						content_css: [baseCssURL, customCSSURL]
+						content_css: contentCSS
 						plugins: "image paste lists"
 						setup: ((inputText) ->
 							windowInputEditor = inputText
@@ -256,61 +283,67 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 		return linkElement
 
 	__getBaseCSSElement: ->
-		baseCssURL = "build/webfrontend/base.css" # todo: what is the correct URL ???
-		if not baseCssURL
-			return
 		linkElement = CUI.dom.element("link",
-			href: baseCssURL
+			href: CustomDataTypeHtmlEditor.getAssetURL("base.css")
 			rel: "stylesheet"
 			type: "text/css"
 		)
-		return linkElement		
+		return linkElement
 
 	renderDetailOutput: (data, topLevelData, opts) ->
 		initData = @__initData(data)
-		bodyContent = CUI.dom.htmlToNodes(initData.value)
+		bodyContent = CUI.dom.htmlToNodes(CustomDataTypeHtmlEditor.sanitize(initData.value))
 		if opts.for_print
 			div = CUI.dom.div()
 			CUI.dom.append(div, bodyContent)
 			return div
 
 		iframe = CUI.dom.$element("iframe", "ez5-custom-data-type-html-editor-iframe")
+		iframe.setAttribute("scrolling", "no") # We size the iframe to its content, a scrollbar would make the width oscillate.
+		# Never allow-scripts: next to allow-same-origin (needed to fill and measure it from here) the content could lift the sandbox.
+		iframe.setAttribute("sandbox", "allow-same-origin allow-popups allow-popups-to-escape-sandbox")
 
 		html = CUI.dom.element("html")
 		head = CUI.dom.element("head")
 		body = CUI.dom.element("body")
+		# The body is stretched to the height of the iframe, so the content goes into a div we can measure ("flow-root" keeps its outer margins inside).
+		contentNode = CUI.dom.div("ez5-custom-data-type-html-editor-content")
+		CUI.dom.setStyle(contentNode, "display": "flow-root")
 
 		CUI.dom.append(html, head)
 		CUI.dom.append(html, body)
 		CUI.dom.setStyle(body, "margin": "0px") # Remove the default margin of the HTML.
 
-		CUI.dom.append(body, bodyContent)
-		# append base style CSS
-		baseLinkElement = @__getBaseCSSElement()
-		if baseLinkElement
-			CUI.dom.append(head, baseLinkElement)
+		CUI.dom.append(contentNode, bodyContent)
+		CUI.dom.append(body, contentNode)
+		CUI.dom.append(head, @__getBaseCSSElement())
 
-		# append custom style CSS
 		customLinkElement = @__getCustomCSSElement()
 		if customLinkElement
 			CUI.dom.append(head, customLinkElement)
 
 		iframe.addEventListener("load", =>
-			iframeContent = iframe.contentDocument.documentElement
-			iframeContent.innerHTML = html.innerHTML
+			doc = iframe.contentDocument
+			doc.documentElement.innerHTML = html.innerHTML
 
-			# Resize iframe to its actual content
-			# todo: something is still off with the height
-			# todo: can we make this dynamic, so the iframe changes when the outside changes (sidebar)
-			doc = iframe.contentDocument || iframe.contentWindow.document
+			node = doc.body.firstElementChild
+			lastHeight = null
+			resize = ->
+				height = Math.ceil(node.getBoundingClientRect().height)
+				if height == lastHeight
+					return
+				lastHeight = height
+				CUI.dom.setStyleOne(iframe, "height", height + "px")
+				return
 
-			# Pick the larger of body/document heights to be safe
-			height = Math.max(
-				doc.body.scrollHeight,
-				doc.documentElement.scrollHeight
-			)
-
-			iframe.style.height = height + 'px';
+			# The stylesheet, the webfont and the images all arrive after this, and the width follows the panel.
+			# The listeners live in the document of the iframe, so they go away with it.
+			doc.addEventListener("load", resize, true)
+			doc.fonts?.ready.then(resize)
+			iframe.contentWindow.addEventListener("resize", resize)
+			resize()
+			window.requestAnimationFrame(resize) # The first measure can land before the layout has settled.
+			return
 		)
 
 		resultObject = opts.detail?.object
@@ -330,21 +363,25 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 				features = "toolbar=no,status=no,menubar=no,scrollbars=yes,width=#{window.innerWidth},height=#{window.innerHeight}"
 				win = window.open("", "_blank", features)
 
-				newInputElement = CUI.dom.element("input")
-				newInputElement.value = initData.value
 				win.document.title = $$("custom.data.type.html-editor.detail.window.title",
 					standard: standardTitle
 					fieldName: @ColumnSchema._name_localized
 				)
-				
-				# add custom stylesheet to preview
-				if baseLinkElement
-					win.document.head.appendChild(baseLinkElement)			
-				
-				if customLinkElement
-					win.document.head.appendChild(customLinkElement)
 
-				win.document.body.innerHTML = initData.value
+				# Same-origin with fylr and without a sandbox: the policy backs up the sanitizing.
+				cspElement = CUI.dom.element("meta",
+					"http-equiv": "Content-Security-Policy"
+					content: "script-src 'none'; form-action 'none'"
+				)
+				win.document.head.appendChild(cspElement)
+
+				# New elements, appending moves them out of the iframe document.
+				win.document.head.appendChild(@__getBaseCSSElement())
+				customCSSElement = @__getCustomCSSElement()
+				if customCSSElement
+					win.document.head.appendChild(customCSSElement)
+
+				win.document.body.innerHTML = CustomDataTypeHtmlEditor.sanitize(initData.value)
 				win.addEventListener('beforeunload', ->
 					openButton.enable()
 				)
@@ -373,12 +410,26 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 		save_data[@name()] = CustomDataTypeHtmlEditor.buildData(fieldData.value)
 		return save_data[@name()]
 
+	# Files shipped with the plugin are served below its base URL, which differs between easydb5 and fylr.
+	@getAssetURL: (path) ->
+		baseURL = ez5.pluginManager.getPlugin("custom-data-type-html-editor").getBaseURL()
+		if not baseURL.endsWith("/")
+			baseURL = baseURL + "/"
+		return ez5.getAbsoluteURL(baseURL + path)
+
+	# The value also arrives through the API and the CSV import, which never pass TinyMCE.
+	# DOMPurify comes with the plugin (purify.min.js in the bundle), the frontend does not expose its own.
+	@sanitize: (html) ->
+		return DOMPurify.sanitize(html, ADD_ATTR: ["target"])
+
 	@buildData: (stringContent) ->
+		stringContent = CustomDataTypeHtmlEditor.sanitize(stringContent)
 		if ez5.version("6") and CUI.util.isEmpty(stringContent)
 			return null
 
 		searchValue = []
-		for _, value of CUI.dom.htmlToNodes(stringContent)
+		# A parsed document has no browsing context, nothing gets loaded while we read the text.
+		for value in new DOMParser().parseFromString(stringContent, "text/html").body.childNodes
 			text = value.textContent
 			if not text or /^(\s|\n)$/.test(text)
 				continue
@@ -420,7 +471,6 @@ class CustomDataTypeHtmlEditor extends CustomDataType
 CustomDataType.register(CustomDataTypeHtmlEditor)
 
 ez5.session_ready ->
-	plugin = ez5.pluginManager.getPlugin("custom-data-type-html-editor")
-	url = ez5.getAbsoluteURL(plugin.getBaseURL() + "/tinymce/tinymce.min.js")
+	url = CustomDataTypeHtmlEditor.getAssetURL("tinymce/tinymce.min.js")
 	CustomDataTypeHtmlEditor.loadLibraryPromise = CUI.loadScript(url)
 	return

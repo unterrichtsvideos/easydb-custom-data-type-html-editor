@@ -8,6 +8,8 @@ L10N_GOOGLE_KEY = 1Z3UPJ6XqLBp-P8SUf-ewq4osNJ3iZWKJB83tc6Wrfn0
 L10N_GOOGLE_GID = 926543909
 
 INSTALL_FILES = \
+	$(BASE_CSS) \
+	$(WEB)/fonts \
 	$(WEB)/l10n/cultures.json \
 	$(WEB)/l10n/de-DE.json \
 	$(WEB)/l10n/en-US.json \
@@ -24,12 +26,22 @@ COFFEE_FILES = src/webfrontend/CustomDataTypeHtmlEditor.coffee \
 
 SCSS_FILES = src/webfrontend/scss/custom-data-type-html-editor.scss
 
+# base style loaded into the iframes of the detail and of the editor (tinymce)
+BASE_CSS = $(WEB)/base.css
+BASE_SCSS_FILES = src/webfrontend/scss/base.scss \
+	src/webfrontend/scss/_normalize.scss \
+	src/webfrontend/scss/_reset.scss \
+	src/webfrontend/scss/_variables.scss
+
 THIRDPARTY_FILES = build/webfrontend/tinymce
 
 
 all: build
 
 include easydb-library/tools/base-plugins.make
+
+# DOMPurify goes into the same bundle, the plugin cannot rely on the frontend for it
+$(JS): src/thirdparty/purify.min.js
 
 buildinfojson:
 	repo=`git remote get-url origin | sed -e 's/\.git$$//' -e 's#.*[/\\]##'` ;\
@@ -53,9 +65,16 @@ thirdparty_copy:
 
 code: $(JS) css thirdparty_copy
 
-# generate base style css to include in the iframe (editor) and output (detail)
-css: src/webfrontend/scss/base.scss
-	sass src/webfrontend/scss/base.scss build/webfrontend/base.css
+css: $(BASE_CSS) $(WEB)/fonts
+
+$(BASE_CSS): $(BASE_SCSS_FILES)
+	mkdir -p $(dir $@)
+	$(WEBFRONTEND_SASS) --no-source-map src/webfrontend/scss/base.scss $@
+
+# the @font-face rules in base.css point here
+$(WEB)/fonts: $(wildcard src/webfrontend/fonts/*)
+	mkdir -p $@
+	cp -r src/webfrontend/fonts/. $@
 
 clean: clean-base
 
